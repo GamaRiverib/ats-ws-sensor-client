@@ -264,107 +264,101 @@ void effectTimer() {
     strip.show();
 }
 
-#define EFFECT_CYLON_SPEED          1000
+#define EFFECT_CYLON_SPEED          300
 #define EFFECT_CYLON_EYE_SIZE       1
 
 bool effect_cylon_dir = true;
-uint8_t effect_cylon_delay = EFFECT_CYLON_SPEED;
 uint16_t effect_cylon_counter = 0;
+uint64_t effect_cylon_timestamp = 0;
 
 void effectCylon() {
 
-    if (effect_cylon_delay > 0) {
-        effect_cylon_delay--;
-        return;
+    uint64_t now = millis();
+    if (now - effect_cylon_timestamp >= EFFECT_CYLON_SPEED) {
+        effect_cylon_timestamp = now;
+
+        RGBColor rgb = getRGBColor(redColor);
+
+        uint8_t r = rgb.red / 10;
+        uint8_t g = rgb.green / 10;
+        uint8_t b = rgb.blue / 10;
+        uint32_t color = strip.Color(r, g, b);
+
+        uint16_t pixel = effect_cylon_counter;
+        uint16_t length = strip.numPixels();
+
+        if(effect_cylon_dir) {
+            effect_cylon_counter++;
+            effect_cylon_dir = pixel < (length - EFFECT_CYLON_EYE_SIZE - 3);
+        } else {
+            effect_cylon_counter--;
+            effect_cylon_dir = pixel <= 1;
+        }
+
+        stripSetAllPixels(blackColor);
+        strip.setPixelColor(pixel, color);
+        uint8_t i = 1;
+        for(; i <= EFFECT_CYLON_EYE_SIZE; i++) {
+            strip.setPixelColor(pixel + i, redColor);
+        }
+        strip.setPixelColor(pixel + EFFECT_CYLON_EYE_SIZE + 1, color);
+        strip.show();
+
     }
-
-    effect_cylon_delay = EFFECT_CYLON_SPEED;
-
-    RGBColor rgb = getRGBColor(redColor);
-
-    uint8_t r = rgb.red / 10;
-    uint8_t g = rgb.green / 10;
-    uint8_t b = rgb.blue / 10;
-    uint32_t color = strip.Color(r, g, b);
-
-    uint16_t pixel = effect_cylon_counter;
-    uint16_t length = strip.numPixels();
-
-    if(effect_cylon_dir) {
-        effect_cylon_counter++;
-        effect_cylon_dir = pixel < (length - EFFECT_CYLON_EYE_SIZE - 2);
-    } else {
-        effect_cylon_counter--;
-        effect_cylon_dir = pixel <= 1;
-    }
-
-    stripSetAllPixels(blackColor);
-    strip.setPixelColor(pixel, color);
-    uint8_t i = 1;
-    for(; i <= EFFECT_CYLON_EYE_SIZE; i++) {
-        strip.setPixelColor(pixel + i, redColor);
-    }
-    strip.setPixelColor(pixel + EFFECT_CYLON_EYE_SIZE + 1, color);
-    strip.show();
 }
 
 #define EFFECT_STROBE_SPEED          500
-uint8_t effect_strobe_delay = 0;
 bool effect_strobe_state = false;
+uint64_t effect_strobe_timestamp = 0;
 
 void effectStrobe() {
-    if(effect_strobe_delay > 0) {
-        effect_strobe_delay--;
-        return;
+    uint64_t now = millis();
+    if (now - effect_strobe_timestamp >= EFFECT_STROBE_SPEED) {
+        effect_strobe_timestamp = now;
+        if(effect_strobe_state) {
+            stripSetAllPixels(redColor);
+            strip.show();
+        } else {
+            stripSetAllPixels(blackColor);
+            strip.show();
+        }
+        effect_strobe_state = !effect_strobe_state;
     }
-
-    effect_strobe_delay = EFFECT_STROBE_SPEED;
-
-    if(effect_strobe_state) {
-        stripSetAllPixels(redColor);
-        strip.show();
-    } else {
-        stripSetAllPixels(blackColor);
-        strip.show();
-    }
-    effect_strobe_state = !effect_strobe_state;
 }
 
-#define EFFECT_FADE_SPEED          500
-uint8_t effect_fade_delay = 0;
+#define EFFECT_FADE_SPEED          10
+uint64_t effect_fade_timestamp = 0;
 bool effect_fade_dir = true;
 uint8_t effect_fade_counter = 0;
 uint32_t effect_fade_color = redColor;
 
 void effectFade() {
-    if(effect_fade_delay > 0) {
-        effect_fade_delay--;
-        return;
+    uint64_t now = millis();
+    if (now - effect_fade_timestamp >= EFFECT_FADE_SPEED) {
+        effect_fade_timestamp = now;
+
+        if(effect_fade_dir) {
+            effect_fade_dir = effect_fade_counter < 254;
+            effect_fade_counter++;
+        } else {
+            effect_fade_dir = effect_fade_counter < 2;
+            effect_fade_counter--;
+        }
+
+        RGBColor rgb = getRGBColor(effect_fade_color);
+
+        uint8_t r = (effect_fade_counter / 256.0) * rgb.red;
+        uint8_t g = (effect_fade_counter / 256.0) * rgb.green;
+        uint8_t b = (effect_fade_counter / 256.0) * rgb.blue;
+        uint32_t c = strip.Color(r, g, b);
+        stripSetAllPixels(c);
+        strip.show();
     }
-
-    effect_fade_delay = EFFECT_FADE_SPEED;
-
-    if(effect_fade_dir) {
-        effect_fade_dir = effect_fade_counter < 254;
-        effect_fade_counter++;
-    } else {
-        effect_fade_dir = effect_fade_counter < 2;
-        effect_fade_counter--;
-    }
-
-    RGBColor rgb = getRGBColor(effect_fade_color);
-
-    uint8_t r = (effect_fade_counter / 256.0) * rgb.red;
-    uint8_t g = (effect_fade_counter / 256.0) * rgb.green;
-    uint8_t b = (effect_fade_counter / 256.0) * rgb.blue;
-    uint32_t c = strip.Color(r, g, b);
-    stripSetAllPixels(c);
-    strip.show();
 }
 
 void loopStrip() {
     if(!isConnected) {
-        effect_fade_color = blueColor;
+        effect_fade_color = yellowColor;
         currentEffect = FADE;
         effectFade();
     } else {
@@ -413,7 +407,7 @@ void onSystemStateChanged(uint8_t * payload) {
         }
         case 1: // DISARMED
         {
-            stripSetAllPixels(yellowColor);
+            stripSetAllPixels(blueColor);
             strip.show();
             currentEffect = StripEffect::COLOR;
             break;
