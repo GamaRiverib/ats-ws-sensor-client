@@ -10,13 +10,14 @@
 #include "sha1.h"
 #include "TOTP.h"
 
+#include <Adafruit_NeoPixel.h>
+
 ESP8266WiFiMulti WiFiMulti;
 WebSocketsClient webSocket;
 
 #define DEBUG
-#define OUTPUT_DEVICE
 
-#define PIR_SENSOR_1_ENABLED
+// #define PIR_SENSOR_1_ENABLED
 // #define PIR_SENSOR_2_ENABLED
 // #define PROX_SENSOR_ENABLED
 
@@ -54,20 +55,50 @@ WebSocketsClient webSocket;
 #define WHO_MESSAGE_LENGTH              12
 #define TIME_MESSAGE_LENGTH             21
 
-#ifdef OUTPUT_DEVICE
-    #define SYSTEM_STATE_CHANGED_CODE       2
-    #define SYSTEM_ARMED_CODE               22
-    #define SYSTEM_DISARMED_CODE            23
-    #define SYSTEM_ALARMED_CODE             24
-    #define SYSTEM_ALERT_CODE               25
-    #define MAX_ALERTS_CODE                 28
-    #define MAX_UNAUTHORIZED_CODE           29
-#endif
+#define SYSTEM_STATE_CHANGED_CODE       2
+#define SYSTEM_ARMED_CODE               22
+#define SYSTEM_DISARMED_CODE            23
+#define SYSTEM_ALARMED_CODE             24
+#define SYSTEM_ALERT_CODE               25
+#define MAX_ALERTS_CODE                 28
+#define MAX_UNAUTHORIZED_CODE           29
 
 const char * wsServer = "192.168.137.1";
 const int wsPort = 3000;
-const char * ssid = "";
-const char * pass = "";
+const char * ssid = "NVKJGRI";
+const char * pass = "Novutek01";
+
+#define PIXEL_COUNT              12
+
+#ifdef ESP12
+    #define PIXEL_PIN            D5 // GPIO14
+#else
+    #define PIXEL_PIN            3
+#endif
+
+Adafruit_NeoPixel strip(PIXEL_COUNT, PIXEL_PIN, NEO_GRB + NEO_KHZ800);
+
+#define COLOR_SATURATION         128
+
+uint32_t redColor = strip.Color(COLOR_SATURATION, 0, 0);
+uint32_t greenColor = strip.Color(0, COLOR_SATURATION, 0);
+uint32_t blueColor = strip.Color(0, 0, COLOR_SATURATION);
+uint32_t yellowColor = strip.Color(COLOR_SATURATION, COLOR_SATURATION, 0);
+uint32_t orangeColor = strip.Color(COLOR_SATURATION, COLOR_SATURATION / 2, 0);
+uint32_t whiteColor = strip.Color(COLOR_SATURATION, COLOR_SATURATION, COLOR_SATURATION);
+uint32_t blackColor = strip.Color(0, 0, 0);
+
+enum StripEffect {
+    OFF,
+    ON,
+    COLOR,
+    TIMER,
+    CYLON,
+    STROBE,
+    FADE
+};
+
+StripEffect currentEffect;
 
 uint64_t heartbeatTimestamp = 0;
 bool isConnected = false;
@@ -89,7 +120,7 @@ uint8_t disconnectedCount = 0;
 // The shared secret is G6JASFJQPH0O80PH -> 0x81, 0xA6, 0xAE, 0x3E, 0x7A, 0xCC, 0x41, 0x84, 0x03, 0x31
 // The shared secret is MM6N67MLMVNBF51E -> 0xB5, 0x8D, 0x73, 0x1E, 0xD5, 0xB7, 0xEE, 0xB7, 0x94, 0x2E
 // The shared secret is C8FNBGOG4VPO55FA -> 0x62, 0x1F, 0x75, 0xC3, 0x10, 0x27, 0xF3, 0x82, 0x95, 0xEA
-uint8_t hmacKey[] = { 0x34, 0x2E, 0x29, 0x76, 0xB8, 0xA3, 0x54, 0xEA, 0x8B, 0x57 }; // <- Conversions.base32ToHexadecimal(secret);
+uint8_t hmacKey[] = { 0x1D, 0x40, 0xC8, 0x75, 0x96, 0xDE, 0x83, 0xDD, 0xAE, 0x7F }; // <- Conversions.base32ToHexadecimal(secret);
 const int keyLen = 10;
 const int timeStep = 60;
 unsigned long serverTime = 0;
@@ -144,13 +175,26 @@ void handleTimeMessage(uint8_t * payload) {
     }
 }
 
-#ifdef OUTPUT_DEVICE
+typedef struct RGBColor {
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+} RGBColor;
+
+RGBColor getRGBColor(uint32_t color) {
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    RGBColor c = { r, g, b };
+    return c;
+}
+
 struct System {
     uint8_t state;
     uint8_t mode;
     uint16_t leftTime;
     size_t count;
-    uint16_t sensors[99];
+    uint16_t sensors[98];
 };
 
 System getSystem(uint8_t * payload, uint8_t index) {
@@ -164,10 +208,6 @@ System getSystem(uint8_t * payload, uint8_t index) {
             uint16_t l = (toDigit(payload[index++]) * 10) + toDigit(payload[index++]);
             sensors[i] = l;
         }
-        /*for(uint16_t i = index; i < index + count * 2; i++) {
-            uint16_t l = (toDigit(payload[i++]) * 10) + toDigit(payload[i]);
-            sensors[i - index] = l;
-        }*/
     }
 
     System system = {
@@ -181,8 +221,239 @@ System getSystem(uint8_t * payload, uint8_t index) {
     return system;
 }
 
+void stripSetAllPixels(uint32_t color) {
+    uint16_t count = strip.numPixels();
+    uint16_t i = 0;
+    for(; i < count; i++) {
+        strip.setPixelColor(i, color);
+    }
+}
+
+uint64_t timer_timestamp = 0;
+uint64_t timer_counter = 0;
+
+void timer() {
+    uint64_t now = millis();
+    if (now - timer_timestamp >= 1000 && timer_counter > 0) {
+        timer_timestamp = now;
+        timer_counter--;
+        #ifdef DEBUG
+            SERIAL_MONITOR.printf("Countdown: %d\n", timer_counter);
+        #endif
+    }
+}
+
+uint64_t effect_timer_initial_count = 60; // SECONDS
+uint64_t effect_timer_step = effect_timer_initial_count / strip.numPixels() * 1000; // MILLISECONDS
+uint64_t effect_timer_delay = 0;
+
+void effectTimer() {
+    if(effect_timer_delay > 0) {
+        effect_timer_delay--;
+        return;
+    }
+
+    effect_timer_delay = effect_timer_step;
+
+    stripSetAllPixels(blackColor);
+    uint64_t t = timer_counter * strip.numPixels() / effect_timer_initial_count;
+    uint8_t i = 0;
+    for(; i < t; i++) {
+        strip.setPixelColor(i, orangeColor);
+    }
+    strip.show();
+}
+
+#define EFFECT_CYLON_SPEED          1000
+#define EFFECT_CYLON_EYE_SIZE       1
+
+bool effect_cylon_dir = true;
+uint8_t effect_cylon_delay = EFFECT_CYLON_SPEED;
+uint16_t effect_cylon_counter = 0;
+
+void effectCylon() {
+
+    if (effect_cylon_delay > 0) {
+        effect_cylon_delay--;
+        return;
+    }
+
+    effect_cylon_delay = EFFECT_CYLON_SPEED;
+
+    RGBColor rgb = getRGBColor(redColor);
+
+    uint8_t r = rgb.red / 10;
+    uint8_t g = rgb.green / 10;
+    uint8_t b = rgb.blue / 10;
+    uint32_t color = strip.Color(r, g, b);
+
+    uint16_t pixel = effect_cylon_counter;
+    uint16_t length = strip.numPixels();
+
+    if(effect_cylon_dir) {
+        effect_cylon_counter++;
+        effect_cylon_dir = pixel < (length - EFFECT_CYLON_EYE_SIZE - 2);
+    } else {
+        effect_cylon_counter--;
+        effect_cylon_dir = pixel <= 1;
+    }
+
+    stripSetAllPixels(blackColor);
+    strip.setPixelColor(pixel, color);
+    uint8_t i = 1;
+    for(; i <= EFFECT_CYLON_EYE_SIZE; i++) {
+        strip.setPixelColor(pixel + i, redColor);
+    }
+    strip.setPixelColor(pixel + EFFECT_CYLON_EYE_SIZE + 1, color);
+    strip.show();
+}
+
+#define EFFECT_STROBE_SPEED          500
+uint8_t effect_strobe_delay = 0;
+bool effect_strobe_state = false;
+
+void effectStrobe() {
+    if(effect_strobe_delay > 0) {
+        effect_strobe_delay--;
+        return;
+    }
+
+    effect_strobe_delay = EFFECT_STROBE_SPEED;
+
+    if(effect_strobe_state) {
+        stripSetAllPixels(redColor);
+        strip.show();
+    } else {
+        stripSetAllPixels(blackColor);
+        strip.show();
+    }
+    effect_strobe_state = !effect_strobe_state;
+}
+
+#define EFFECT_FADE_SPEED          500
+uint8_t effect_fade_delay = 0;
+bool effect_fade_dir = true;
+uint8_t effect_fade_counter = 0;
+uint32_t effect_fade_color = redColor;
+
+void effectFade() {
+    if(effect_fade_delay > 0) {
+        effect_fade_delay--;
+        return;
+    }
+
+    effect_fade_delay = EFFECT_FADE_SPEED;
+
+    if(effect_fade_dir) {
+        effect_fade_dir = effect_fade_counter < 254;
+        effect_fade_counter++;
+    } else {
+        effect_fade_dir = effect_fade_counter < 2;
+        effect_fade_counter--;
+    }
+
+    RGBColor rgb = getRGBColor(effect_fade_color);
+
+    uint8_t r = (effect_fade_counter / 256.0) * rgb.red;
+    uint8_t g = (effect_fade_counter / 256.0) * rgb.green;
+    uint8_t b = (effect_fade_counter / 256.0) * rgb.blue;
+    uint32_t c = strip.Color(r, g, b);
+    stripSetAllPixels(c);
+    strip.show();
+}
+
+void loopStrip() {
+    if(!isConnected) {
+        effect_fade_color = blueColor;
+        currentEffect = FADE;
+        effectFade();
+    } else {
+        switch (currentEffect)
+        {
+            case StripEffect::OFF:
+            case StripEffect::ON:
+            case StripEffect::COLOR:
+                break;
+            case StripEffect::TIMER:
+                effectTimer();
+                break;
+            case StripEffect::CYLON:
+                effectCylon();
+                break;
+            case StripEffect::STROBE:
+                effectStrobe();
+                break;
+            case StripEffect::FADE:
+                effectFade();
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 void onSystemStateChanged(uint8_t * payload) {
     System system = getSystem(payload, 8);
+    /**
+     * READY = 0,
+     * DISARMED = 1,
+     * LEAVING = 2,
+     * ARMED = 3,
+     * ENTERING = 4,
+     * ALARMED = 5,
+     * PROGRAMMING = 6
+     */
+    switch(system.state) {
+        case 0: // READY
+        {
+            stripSetAllPixels(greenColor);
+            strip.show();
+            currentEffect = StripEffect::COLOR;
+            break;
+        }
+        case 1: // DISARMED
+        {
+            stripSetAllPixels(yellowColor);
+            strip.show();
+            currentEffect = StripEffect::COLOR;
+            break;
+        }
+        case 2: // LEAVING
+        case 4: // ENTERING
+        {
+            timer_counter = system.leftTime;
+            effect_timer_initial_count = system.leftTime;
+            if (effect_timer_initial_count < strip.numPixels()) {
+                effect_timer_step = 500;
+            } else {
+                effect_timer_step = effect_timer_initial_count / strip.numPixels() * 1000;
+            }
+            effect_timer_delay = effect_timer_step;
+            #ifdef DEBUG
+                SERIAL_MONITOR.printf("Step: %l\n", effect_timer_step);
+                SERIAL_MONITOR.printf("Initial count: %l\n", effect_timer_initial_count);
+            #endif
+            currentEffect = StripEffect::TIMER;
+            break;
+        }
+        case 3: // ARMED
+        {
+            currentEffect = StripEffect::CYLON;
+            break;
+        }
+        case 5: // ALARMED
+        {
+            currentEffect = StripEffect::STROBE;
+            break;
+        }
+        case 6: // PROGRAMMING
+        {
+            stripSetAllPixels(blueColor);
+            strip.show();
+            currentEffect = StripEffect::COLOR;
+            break;
+        }
+    }
     #ifdef DEBUG
         SERIAL_MONITOR.println("SYSTEM_STATE_CHANGED");
         SERIAL_MONITOR.printf(" - State: %d\n", system.state);
@@ -197,56 +468,9 @@ void onSystemStateChanged(uint8_t * payload) {
     #endif
 }
 
-void onSystemArmed(uint8_t * payload) {
-    System system = getSystem(payload, 9);
-    #ifdef DEBUG
-        SERIAL_MONITOR.println("SYSTEM_ARMED");
-        SERIAL_MONITOR.printf(" - State: %d\n", system.state);
-        SERIAL_MONITOR.printf(" - Mode: %d\n", system.mode);
-        SERIAL_MONITOR.printf(" - Left Time: %d\n", system.leftTime);
-        SERIAL_MONITOR.printf(" - Count: %d\n", system.count);
-        if(system.count > 0) {
-            for(uint16_t i = 0; i < system.count; i++) {
-                SERIAL_MONITOR.printf("\t %d Sensor location: %d\n", (i + 1), system.sensors[i]);
-            }
-        }
-    #endif
-}
-
-void onSystemDisarmed(uint8_t * payload) {
-    System system = getSystem(payload, 9);
-    #ifdef DEBUG
-        SERIAL_MONITOR.println("SYSTEM_DISARMED");
-        SERIAL_MONITOR.printf(" - State: %d\n", system.state);
-        SERIAL_MONITOR.printf(" - Mode: %d\n", system.mode);
-        SERIAL_MONITOR.printf(" - Left Time: %d\n", system.leftTime);
-        SERIAL_MONITOR.printf(" - Count: %d\n", system.count);
-        if(system.count > 0) {
-            for(uint16_t i = 0; i < system.count; i++) {
-                SERIAL_MONITOR.printf("\t %d Sensor location: %d\n", (i + 1), system.sensors[i]);
-            }
-        }
-    #endif
-}
-
-void onSystemAlarmed(uint8_t * payload) {
-    System system = getSystem(payload, 9);
-    #ifdef DEBUG
-        SERIAL_MONITOR.println("SYSTEM_ALARMED");
-        SERIAL_MONITOR.printf(" - State: %d\n", system.state);
-        SERIAL_MONITOR.printf(" - Mode: %d\n", system.mode);
-        SERIAL_MONITOR.printf(" - Left Time: %d\n", system.leftTime);
-        SERIAL_MONITOR.printf(" - Count: %d\n", system.count);
-        if(system.count > 0) {
-            for(uint16_t i = 0; i < system.count; i++) {
-                SERIAL_MONITOR.printf("\t %d Sensor location: %d\n", (i + 1), system.sensors[i]);
-            }
-        }
-    #endif
-}
-
 void onSystemAlert(uint8_t * payload) {
     System system = getSystem(payload, 9);
+    // TODO: strip -> fade effect yellow
     #ifdef DEBUG
         SERIAL_MONITOR.println("SYSTEM_ALERT");
         SERIAL_MONITOR.printf(" - State: %d\n", system.state);
@@ -263,6 +487,7 @@ void onSystemAlert(uint8_t * payload) {
 
 void onMaxAlerts(uint8_t * payload) {
     System system = getSystem(payload, 9);
+    // TODO: strip -> fade effect red
     #ifdef DEBUG
         SERIAL_MONITOR.println("MAX_ALERTS");
         SERIAL_MONITOR.printf(" - State: %d\n", system.state);
@@ -279,6 +504,7 @@ void onMaxAlerts(uint8_t * payload) {
 
 void onMaxUnauthorized(uint8_t * payload) {
     System system = getSystem(payload, 9);
+    // TODO: strip -> fade effect red
     #ifdef DEBUG
         SERIAL_MONITOR.println("MAX_UNAUTHORIZED_INTENTS");
         SERIAL_MONITOR.printf(" - State: %d\n", system.state);
@@ -292,7 +518,6 @@ void onMaxUnauthorized(uint8_t * payload) {
         }
     #endif
 }
-#endif
 
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     switch(type) 
@@ -346,7 +571,6 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                     break;
                 default:
                 {
-                    #ifdef OUTPUT_DEVICE
                     if(length > 15 && length < 35) { // TODO: supported events
                         uint8_t i = 4;
                         uint8_t event = toDigit(payload[i++]);
@@ -373,13 +597,8 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                                 onSystemStateChanged(payload);
                                 break;
                             case SYSTEM_ARMED_CODE:
-                                onSystemArmed(payload);
-                                break;
                             case SYSTEM_DISARMED_CODE:
-                                onSystemDisarmed(payload);
-                                break;
                             case SYSTEM_ALARMED_CODE:
-                                onSystemAlarmed(payload);
                                 break;
                             case SYSTEM_ALERT_CODE:
                                 onSystemAlert(payload);
@@ -395,7 +614,6 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                                 break;
                         }
                     }
-                    #endif
                     break;
                 }
             }
@@ -546,6 +764,11 @@ void setup() {
         pinMode(PROX_SENSOR_ECHO_PIN, INPUT);
     #endif
 
+    // this resets all the neopixels to an off state
+    strip.begin();
+    strip.show();
+    currentEffect = StripEffect::OFF;
+
     #ifdef DEBUG
         SERIAL_MONITOR.println(F("[SETUP] DONE!"));
         SERIAL_MONITOR.printf("[%s] device%d ready\n", WiFi.macAddress().c_str(), ESP.getChipId());
@@ -570,4 +793,8 @@ void loop() {
     #endif
 
     heartbeat();
+
+    timer();
+
+    loopStrip();
 }
