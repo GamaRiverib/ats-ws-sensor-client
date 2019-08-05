@@ -132,9 +132,9 @@ char code[7];
 int toDigit(uint8_t c) { // TODO
     if (c >= 0x30 && c <= 0x39) { 
         return c - 0x30;
-    } else if (c >= 0x41 && c <= 0x46) {
+    } else if (c >= 0x41 && c <= 0x56) {
         return c - 0x37;
-    } else if (c >= 0x61 && c <= 0x66) {
+    } else if (c >= 0x61 && c <= 0x76) {
         return c - 0x57;
     } else {
         return 0;
