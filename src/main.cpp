@@ -17,7 +17,7 @@ WebSocketsClient webSocket;
 
 #define DEBUG
 
-// #define PIR_SENSOR_1_ENABLED
+#define PIR_SENSOR_1_ENABLED
 // #define PIR_SENSOR_2_ENABLED
 // #define PROX_SENSOR_ENABLED
 
@@ -54,6 +54,7 @@ WebSocketsClient webSocket;
 
 #define WHO_MESSAGE_LENGTH              12
 #define TIME_MESSAGE_LENGTH             21
+#define CLIENT_ONLINE_LENGTH            37
 
 #define SYSTEM_STATE_CHANGED_CODE       2
 #define SYSTEM_ARMED_CODE               22
@@ -62,11 +63,12 @@ WebSocketsClient webSocket;
 #define SYSTEM_ALERT_CODE               25
 #define MAX_ALERTS_CODE                 28
 #define MAX_UNAUTHORIZED_CODE           29
+#define CLIENT_ONLINE_CODE              30
 
 const char * wsServer = "192.168.137.1";
 const int wsPort = 3000;
-const char * ssid = "NVKJGRI";
-const char * pass = "Novutek01";
+const char * ssid = "";
+const char * pass = "";
 
 #define PIXEL_COUNT              12
 
@@ -120,7 +122,7 @@ uint8_t disconnectedCount = 0;
 // The shared secret is G6JASFJQPH0O80PH -> 0x81, 0xA6, 0xAE, 0x3E, 0x7A, 0xCC, 0x41, 0x84, 0x03, 0x31
 // The shared secret is MM6N67MLMVNBF51E -> 0xB5, 0x8D, 0x73, 0x1E, 0xD5, 0xB7, 0xEE, 0xB7, 0x94, 0x2E
 // The shared secret is C8FNBGOG4VPO55FA -> 0x62, 0x1F, 0x75, 0xC3, 0x10, 0x27, 0xF3, 0x82, 0x95, 0xEA
-uint8_t hmacKey[] = { 0x1D, 0x40, 0xC8, 0x75, 0x96, 0xDE, 0x83, 0xDD, 0xAE, 0x7F }; // <- Conversions.base32ToHexadecimal(secret);
+uint8_t hmacKey[] = { 0x34, 0x2E, 0x29, 0x76, 0xB8, 0xA3, 0x54, 0xEA, 0x8B, 0x57 }; // <- Conversions.base32ToHexadecimal(secret);
 const int keyLen = 10;
 const int timeStep = 60;
 unsigned long serverTime = 0;
@@ -173,6 +175,62 @@ void handleTimeMessage(uint8_t * payload) {
         serverTime = time;
         captureAt = millis() / 1000;
     }
+}
+
+void handelClientOnline(uint8_t * payload, size_t length) {
+    uint8_t i = 4;
+    uint8_t event = toDigit(payload[i++]);
+    while(payload[i] != 0x22 && i < length) { // '\""'
+        event *= 10;
+        event += toDigit(payload[i++]);
+    }
+
+    #ifdef DEBUG
+        SERIAL_MONITOR.printf("\nEvent: %d\n", event);
+    #endif
+
+    if(event == CLIENT_ONLINE_CODE) {
+        uint8_t j = i + 21; // TODO: magic number
+
+        if(j >= length) {
+            return;
+        }
+
+        uint32_t id = toDigit(payload[j++]);
+        while(payload[j] != 0x22 && j < length) {
+            id *= 10;
+            id += toDigit(payload[j++]);
+        }
+
+        uint32_t chipId = ESP.getChipId();
+        if (id == chipId) {
+            uint8_t val;
+            char msg[100];
+            #ifdef PIR_SENSOR_1_ENABLED
+                val = digitalRead(PIR_SENSOR_1_PIN);
+                snprintf(msg, 100, "42[\"state\",{\"sensors\":[{\"pin\":%d,\"value\":%d}]}]", PIR_SENSOR_1_PIN, val);
+                webSocket.sendTXT(msg);
+                pirSensorLastState[i] = val;
+                #ifdef DEBUG
+                    SERIAL_MONITOR.println(msg);
+                #endif
+            #endif
+
+            #ifdef PIR_SENSOR_2_ENABLED
+                val = digitalRead(PIR_SENSOR_2_PIN);
+                snprintf(msg, 100, "42[\"state\",{\"sensors\":[{\"pin\":%d,\"value\":%d}]}]", PIR_SENSOR_2_PIN, val);
+                webSocket.sendTXT(msg);
+                pirSensorLastState[i] = val;
+                #ifdef DEBUG
+                    SERIAL_MONITOR.println(msg);
+                #endif
+            #endif
+
+            #ifdef PROX_SENSOR_ENABLED
+                // TODO
+            #endif
+        }
+    } 
 }
 
 typedef struct RGBColor {
@@ -562,6 +620,9 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                     break;
                 case TIME_MESSAGE_LENGTH: // MessageType: Time
                     handleTimeMessage(payload);
+                    break;
+                case CLIENT_ONLINE_LENGTH: // MessageType: 30 | CLIENT_ONLINE
+                    handelClientOnline(payload, length);
                     break;
                 default:
                 {
