@@ -14,7 +14,7 @@ ESP8266WiFiMulti WiFiMulti;
 WebSocketsClient webSocket;
 
 #define DEBUG
-#define OUTPUT_DEVICE
+// #define OUTPUT_DEVICE
 
 #define PIR_SENSOR_1_ENABLED
 // #define PIR_SENSOR_2_ENABLED
@@ -53,6 +53,7 @@ WebSocketsClient webSocket;
 
 #define WHO_MESSAGE_LENGTH              12
 #define TIME_MESSAGE_LENGTH             21
+#define CLIENT_ONLINE_LENGTH            37
 
 #ifdef OUTPUT_DEVICE
     #define SYSTEM_STATE_CHANGED_CODE       2
@@ -63,6 +64,7 @@ WebSocketsClient webSocket;
     #define MAX_ALERTS_CODE                 28
     #define MAX_UNAUTHORIZED_CODE           29
 #endif
+#define CLIENT_ONLINE_CODE              30
 
 const char * wsServer = "192.168.137.1";
 const int wsPort = 3000;
@@ -142,6 +144,62 @@ void handleTimeMessage(uint8_t * payload) {
         serverTime = time;
         captureAt = millis() / 1000;
     }
+}
+
+void handelClientOnline(uint8_t * payload, size_t length) {
+    uint8_t i = 4;
+    uint8_t event = toDigit(payload[i++]);
+    while(payload[i] != 0x22 && i < length) { // '\""'
+        event *= 10;
+        event += toDigit(payload[i++]);
+    }
+
+    #ifdef DEBUG
+        SERIAL_MONITOR.printf("\nEvent: %d\n", event);
+    #endif
+
+    if(event == CLIENT_ONLINE_CODE) {
+        uint8_t j = i + 21; // TODO: magic number
+
+        if(j >= length) {
+            return;
+        }
+
+        uint32_t id = toDigit(payload[j++]);
+        while(payload[j] != 0x22 && j < length) {
+            id *= 10;
+            id += toDigit(payload[j++]);
+        }
+
+        uint32_t chipId = ESP.getChipId();
+        if (id == chipId) {
+            #ifdef PIR_SENSOR_1_ENABLED
+                uint8_t val = digitalRead(PIR_SENSOR_1_PIN);
+                char payload[100];
+                snprintf(payload, 100, "42[\"state\",{\"sensors\":[{\"pin\":%d,\"value\":%d}]}]", PIR_SENSOR_1_PIN, val);
+                webSocket.sendTXT(payload);
+                pirSensorLastState[i] = val;
+                #ifdef DEBUG
+                    SERIAL_MONITOR.println(payload);
+                #endif
+            #endif
+
+            #ifdef PIR_SENSOR_2_ENABLED
+                uint8_t val = digitalRead(PIR_SENSOR_2_PIN);
+                char payload[100];
+                snprintf(payload, 100, "42[\"state\",{\"sensors\":[{\"pin\":%d,\"value\":%d}]}]", PIR_SENSOR_2_PIN, val);
+                webSocket.sendTXT(payload);
+                pirSensorLastState[i] = val;
+                #ifdef DEBUG
+                    SERIAL_MONITOR.println(payload);
+                #endif
+            #endif
+
+            #ifdef PROX_SENSOR_ENABLED
+                // TODO
+            #endif
+        }
+    } 
 }
 
 #ifdef OUTPUT_DEVICE
@@ -300,6 +358,13 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
         case WStype_DISCONNECTED:
         {
             isConnected = false;
+            disconnectedCount = disconnectedCount + 1;
+            #ifdef DEBUG
+                SERIAL_MONITOR.printf("Disconnected count: %d\n", disconnectedCount);
+            #endif
+            if (disconnectedCount > 12) {
+                ESP.restart();
+            }
             #ifdef DEBUG
                 SERIAL_MONITOR.printf("[WSc] Disconnected!\n");
             #endif
@@ -343,6 +408,9 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
                     break;
                 case TIME_MESSAGE_LENGTH: // MessageType: Time
                     handleTimeMessage(payload);
+                    break;
+                case CLIENT_ONLINE_LENGTH: // MessageType: 30 | CLIENT_ONLINE
+                    handelClientOnline(payload, length);
                     break;
                 default:
                 {
