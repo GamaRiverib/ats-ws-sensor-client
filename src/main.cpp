@@ -17,9 +17,11 @@ WebSocketsClient webSocket;
 
 #define DEBUG
 
-#define PIR_SENSOR_1_ENABLED
+// #define PIR_SENSOR_1_ENABLED
 // #define PIR_SENSOR_2_ENABLED
 // #define PROX_SENSOR_ENABLED
+
+#define BUZZER_ENABLED
 
 #define SERIAL_MONITOR          Serial
 
@@ -52,6 +54,14 @@ WebSocketsClient webSocket;
     #define PROX_SENSOR_THRESHOLD       15
 #endif
 
+#ifdef BUZZER_ENABLED
+    #ifdef ESP12
+        #define BUZZER_PIN              D7
+    #else
+        #define BUZZER_PIN              2
+    #endif
+#endif
+
 #define WHO_MESSAGE_LENGTH              12
 #define TIME_MESSAGE_LENGTH             21
 #define CLIENT_ONLINE_LENGTH            37
@@ -65,17 +75,21 @@ WebSocketsClient webSocket;
 #define MAX_UNAUTHORIZED_CODE           29
 #define CLIENT_ONLINE_CODE              30
 
+const int buzzerSound = 0;
+unsigned long buzzerSoundAt = 0;
+const unsigned long buzzerSoundDelay = 1000;
+
 const char * wsServer = "192.168.137.1";
 const int wsPort = 3000;
 const char * ssid = "";
 const char * pass = "";
 
-#define PIXEL_COUNT              12
+#define PIXEL_COUNT              8
 
 #ifdef ESP12
     #define PIXEL_PIN            D5 // GPIO14
 #else
-    #define PIXEL_PIN            3
+    #define PIXEL_PIN            0
 #endif
 
 Adafruit_NeoPixel strip(PIXEL_COUNT, PIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -122,7 +136,7 @@ uint8_t disconnectedCount = 0;
 // The shared secret is G6JASFJQPH0O80PH -> 0x81, 0xA6, 0xAE, 0x3E, 0x7A, 0xCC, 0x41, 0x84, 0x03, 0x31
 // The shared secret is MM6N67MLMVNBF51E -> 0xB5, 0x8D, 0x73, 0x1E, 0xD5, 0xB7, 0xEE, 0xB7, 0x94, 0x2E
 // The shared secret is C8FNBGOG4VPO55FA -> 0x62, 0x1F, 0x75, 0xC3, 0x10, 0x27, 0xF3, 0x82, 0x95, 0xEA
-uint8_t hmacKey[] = { 0x34, 0x2E, 0x29, 0x76, 0xB8, 0xA3, 0x54, 0xEA, 0x8B, 0x57 }; // <- Conversions.base32ToHexadecimal(secret);
+uint8_t hmacKey[] = { 0x1D, 0x40, 0xC8, 0x75, 0x96, 0xDE, 0x83, 0xDD, 0xAE, 0x7F }; // <- Conversions.base32ToHexadecimal(secret);
 const int keyLen = 10;
 const int timeStep = 60;
 unsigned long serverTime = 0;
@@ -414,33 +428,58 @@ void effectFade() {
     }
 }
 
+#ifdef BUZZER_ENABLED
+void beep() {
+    if (buzzerSoundAt > 0) {
+        return;
+    }
+    digitalWrite(BUZZER_PIN, buzzerSound);
+    buzzerSoundAt = millis();
+}
+
+void loopBuzzer() {
+    if(!isConnected) {
+        digitalWrite(BUZZER_PIN, !buzzerSound);
+        buzzerSoundAt = 0;
+        return;
+    } 
+    if (buzzerSoundAt > 0) {
+        const unsigned long now = millis();
+        if (now - buzzerSoundAt > buzzerSoundDelay) {
+            digitalWrite(BUZZER_PIN, !buzzerSound);
+            buzzerSoundAt = 0;
+        }
+    }
+}
+#endif
+
 void loopStrip() {
     if(!isConnected) {
         effect_fade_color = yellowColor;
         currentEffect = FADE;
         effectFade();
-    } else {
-        switch (currentEffect)
-        {
-            case StripEffect::OFF:
-            case StripEffect::ON:
-            case StripEffect::COLOR:
-                break;
-            case StripEffect::TIMER:
-                effectTimer();
-                break;
-            case StripEffect::CYLON:
-                effectCylon();
-                break;
-            case StripEffect::STROBE:
-                effectStrobe();
-                break;
-            case StripEffect::FADE:
-                effectFade();
-                break;
-            default:
-                break;
-        }
+        return;
+    }
+    switch (currentEffect)
+    {
+        case StripEffect::OFF:
+        case StripEffect::ON:
+        case StripEffect::COLOR:
+            break;
+        case StripEffect::TIMER:
+            effectTimer();
+            break;
+        case StripEffect::CYLON:
+            effectCylon();
+            break;
+        case StripEffect::STROBE:
+            effectStrobe();
+            break;
+        case StripEffect::FADE:
+            effectFade();
+            break;
+        default:
+            break;
     }
 }
 
@@ -481,6 +520,9 @@ void onSystemStateChanged(uint8_t * payload) {
                 effect_timer_step = effect_timer_initial_count / strip.numPixels() * 1000;
             }
             effect_timer_delay = effect_timer_step;
+            #ifdef BUZZER_ENABLED
+                beep();
+            #endif
             #ifdef DEBUG
                 SERIAL_MONITOR.printf("Step: %l\n", effect_timer_step);
                 SERIAL_MONITOR.printf("Initial count: %l\n", effect_timer_initial_count);
@@ -496,6 +538,9 @@ void onSystemStateChanged(uint8_t * payload) {
         case 5: // ALARMED
         {
             currentEffect = StripEffect::STROBE;
+            #ifdef BUZZER_ENABLED
+                beep();
+            #endif
             break;
         }
         case 6: // PROGRAMMING
@@ -540,6 +585,9 @@ void onSystemAlert(uint8_t * payload) {
 void onMaxAlerts(uint8_t * payload) {
     System system = getSystem(payload, 9);
     // TODO: strip -> fade effect red
+    #ifdef BUZZER_ENABLED
+        beep();
+    #endif
     #ifdef DEBUG
         SERIAL_MONITOR.println("MAX_ALERTS");
         SERIAL_MONITOR.printf(" - State: %d\n", system.state);
@@ -819,6 +867,14 @@ void setup() {
         pinMode(PROX_SENSOR_ECHO_PIN, INPUT);
     #endif
 
+    #ifdef BUZZER_ENABLED
+        #ifdef DEBUG
+            SERIAL_MONITOR.println(F("Configuring Buzzer"));
+        #endif
+        pinMode(BUZZER_PIN, OUTPUT);
+        digitalWrite(BUZZER_PIN, !buzzerSound);
+    #endif
+
     // this resets all the neopixels to an off state
     strip.begin();
     strip.show();
@@ -850,6 +906,10 @@ void loop() {
     heartbeat();
 
     timer();
+
+    #ifdef BUZZER_ENABLED
+        loopBuzzer();
+    #endif
 
     loopStrip();
 }
