@@ -1,3 +1,7 @@
+/*****************************************************
+ * Includes
+ * ***************************************************/
+
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>
@@ -8,24 +12,14 @@
 #include "settings.h"
 
 /*****************************************************
- * WiFi, MQTT
- * ***************************************************/
-
-WiFiClient espClient;
-PubSubClient mqttClient(espClient);
-unsigned long lastMsg = 0;
-unsigned long lastReconnectAttempt = 0;
-#define MSG_BUFFER_SIZE	(50)
-char msg[MSG_BUFFER_SIZE];
-uint8_t disconnectedCount = 0;
-uint16_t reconnectDelay = 5000; // 5 seconds
-
-/*****************************************************
- * GENERAL DEFINES
+ * DEFINE
  * ***************************************************/
 
 #define DEBUG
 // #define OUTPUT_DEVICE
+
+// MQTT MESSAGE BUFFER SIZE
+#define MSG_BUFFER_SIZE	(50)
 
 #ifdef OUTPUT_DEVICE
     #define SYSTEM_STATE_CHANGED_CODE       2
@@ -37,6 +31,18 @@ uint16_t reconnectDelay = 5000; // 5 seconds
     #define MAX_UNAUTHORIZED_CODE           29
 #endif
 #define CLIENT_ONLINE_CODE                  30
+
+/*****************************************************
+ * WiFi, MQTT
+ * ***************************************************/
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+unsigned long lastMsg = 0;
+unsigned long lastReconnectAttempt = 0;
+uint8_t disconnectedCount = 0;
+char msg[MSG_BUFFER_SIZE];
+const uint16_t reconnectDelay = 5000; // 5 seconds
 
 /*****************************************************
  * SENSORS
@@ -183,6 +189,10 @@ void updateCode() {
         }
     } 
 }*/
+
+/*****************************************************
+ * OUTPUT DEVICE
+ * ***************************************************/
 
 #ifdef OUTPUT_DEVICE
 struct System {
@@ -475,6 +485,7 @@ void loopPirSensor(uint8_t i, uint8_t pin) {
                 StaticJsonDocument<100> root;
                 JsonArray sensors = root.createNestedArray("sensors");
                 JsonObject sensor_1 = sensors.createNestedObject();
+                sensor_1["mac"] = WiFi.macAddress();
                 sensor_1["pin"] = pin;
                 sensor_1["value"] = val;
                 char buffer[256];
@@ -527,6 +538,7 @@ void loopProxSensor(uint8_t trigger, uint8_t echo) {
                 StaticJsonDocument<100> root;
                 JsonArray sensors = root.createNestedArray("sensors");
                 JsonObject sensor_1 = sensors.createNestedObject();
+                sensor_1["mac"] = WiFi.macAddress();
                 sensor_1["pin"] = echo;
                 sensor_1["value"] = val;
                 char buffer[256];
@@ -581,8 +593,7 @@ boolean mqtt_reconnect() {
         SERIAL_MONITOR.print(F("DeviceId: "));
         SERIAL_MONITOR.println(device_id);
     #endif
-    // if (mqttClient.connect(client_id, mqtt_user, mqtt_pass, will_topic, will_qos, will_retain, will_message, false)) {
-    if (mqttClient.connect(client_id)) {
+    if (mqttClient.connect(client_id, mqtt_user, mqtt_pass, will_topic, will_qos, will_retain, will_message, false)) {
         #ifdef DEBUG
             SERIAL_MONITOR.println(F("connected"));
         #endif
