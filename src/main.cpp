@@ -1,20 +1,46 @@
 #include <Arduino.h>
-
 #include <ESP8266WiFi.h>
-#include <ESP8266WiFiMulti.h>
-
-#include <WebSocketsClient.h>
-
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
 #include <Hash.h>
-
 #include "sha1.h"
 #include "TOTP.h"
+#include "settings.h"
 
-ESP8266WiFiMulti WiFiMulti;
-WebSocketsClient webSocket;
+/*****************************************************
+ * WiFi, MQTT
+ * ***************************************************/
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+unsigned long lastMsg = 0;
+unsigned long lastReconnectAttempt = 0;
+#define MSG_BUFFER_SIZE	(50)
+char msg[MSG_BUFFER_SIZE];
+uint8_t disconnectedCount = 0;
+uint16_t reconnectDelay = 5000; // 5 seconds
+
+/*****************************************************
+ * GENERAL DEFINES
+ * ***************************************************/
 
 #define DEBUG
 // #define OUTPUT_DEVICE
+
+#ifdef OUTPUT_DEVICE
+    #define SYSTEM_STATE_CHANGED_CODE       2
+    #define SYSTEM_ARMED_CODE               22
+    #define SYSTEM_DISARMED_CODE            23
+    #define SYSTEM_ALARMED_CODE             24
+    #define SYSTEM_ALERT_CODE               25
+    #define MAX_ALERTS_CODE                 28
+    #define MAX_UNAUTHORIZED_CODE           29
+#endif
+#define CLIENT_ONLINE_CODE                  30
+
+/*****************************************************
+ * SENSORS
+ * ***************************************************/
 
 #define PIR_SENSOR_1_ENABLED
 // #define PIR_SENSOR_2_ENABLED
@@ -30,18 +56,16 @@ WebSocketsClient webSocket;
     #define PROX_SENSOR_INTERVAL    500
 #endif
 
-#define HEARTBEAT_INTERVAL      20000
-
 #ifdef PIR_SENSOR_1_ENABLED
     #ifdef ESP12
-        #define PIR_SENSOR_1_PIN            D0
+        #define PIR_SENSOR_1_PIN            D6
     #else
         #define PIR_SENSOR_1_PIN            3
     #endif
 #endif
 
 #ifdef PIR_SENSOR_2_ENABLED
-    #define PIR_SENSOR_2_PIN            D6
+    #define PIR_SENSOR_2_PIN            D0
 #endif
 
 #ifdef PROX_SENSOR_ENABLED
@@ -50,30 +74,6 @@ WebSocketsClient webSocket;
 
     #define PROX_SENSOR_THRESHOLD       15
 #endif
-
-#define WHO_MESSAGE_LENGTH              12
-#define TIME_MESSAGE_LENGTH             21
-#define CLIENT_ONLINE_LENGTH            37
-
-#ifdef OUTPUT_DEVICE
-    #define SYSTEM_STATE_CHANGED_CODE       2
-    #define SYSTEM_ARMED_CODE               22
-    #define SYSTEM_DISARMED_CODE            23
-    #define SYSTEM_ALARMED_CODE             24
-    #define SYSTEM_ALERT_CODE               25
-    #define MAX_ALERTS_CODE                 28
-    #define MAX_UNAUTHORIZED_CODE           29
-#endif
-#define CLIENT_ONLINE_CODE              30
-
-const char * wsServer = "192.168.137.1";
-const int wsPort = 3000;
-const char * ssid = "";
-const char * pass = "";
-
-uint64_t heartbeatTimestamp = 0;
-bool isConnected = false;
-uint8_t disconnectedCount = 0;
 
 #if defined (PIR_SENSOR_1_ENABLED) || defined (PIR_SENSOR_2_ENABLED)
     uint64_t pirSensorTimestamp[2] = { 0, 0 };
@@ -85,14 +85,9 @@ uint8_t disconnectedCount = 0;
     uint8_t proxSensorLastDist = 0;
 #endif
 
-// The shared secret is 6GN2ITLOKDAEL2QN -> 0x34, 0x2E, 0x29, 0x76, 0xB8, 0xA3, 0x54, 0xEA, 0x8B, 0x57
-// The shared secret is 3L0CGTCMRQ1TRBJV -> 0x1D, 0x40, 0xC8, 0x75, 0x96, 0xDE, 0x83, 0xDD, 0xAE, 0x7F
-// The shared secret is 1VGIHDLFNHOTUCOK -> 0x0F, 0xE1, 0x28, 0xB6, 0xAF, 0xBC, 0x71, 0xDF, 0x33, 0x14
-// The shared secret is G6JASFJQPH0O80PH -> 0x81, 0xA6, 0xAE, 0x3E, 0x7A, 0xCC, 0x41, 0x84, 0x03, 0x31
-// The shared secret is MM6N67MLMVNBF51E -> 0xB5, 0x8D, 0x73, 0x1E, 0xD5, 0xB7, 0xEE, 0xB7, 0x94, 0x2E
-// The shared secret is C8FNBGOG4VPO55FA -> 0x62, 0x1F, 0x75, 0xC3, 0x10, 0x27, 0xF3, 0x82, 0x95, 0xEA
-uint8_t hmacKey[] = { 0x34, 0x2E, 0x29, 0x76, 0xB8, 0xA3, 0x54, 0xEA, 0x8B, 0x57 }; // <- Conversions.base32ToHexadecimal(secret);
-const int keyLen = 10;
+/*****************************************************
+ * TOTP
+ * ***************************************************/
 const int timeStep = 60;
 unsigned long serverTime = 0;
 unsigned long captureAt = 0;
@@ -120,20 +115,7 @@ void updateCode() {
     } 
 }
 
-void handleWhoMessage(uint8_t * payload) {
-    uint8_t index = 4;
-    if(payload[index++] == 0x57 && payload[index++] == 0x68 && payload[index++] == 0x6F) {
-        updateCode();
-        char response[100];
-        snprintf(response, 100, "42[\"is\",{\"code\":%s,\"clientId\":\"device%d\",\"mac\":\"%s\"}]", code, ESP.getChipId(), WiFi.macAddress().c_str());
-        webSocket.sendTXT(response);
-        #ifdef DEBUG
-            SERIAL_MONITOR.println(response);
-        #endif
-    }
-}
-
-void handleTimeMessage(uint8_t * payload) {
+/*void handleTimeMessage(uint8_t * payload) {
     uint8_t index = 4;
     if(payload[index++] == 0x54 && payload[index++] == 0x69 && payload[index++] == 0x6D && payload[index++] == 0x65) {
         uint16_t i = 10;
@@ -144,9 +126,9 @@ void handleTimeMessage(uint8_t * payload) {
         serverTime = time;
         captureAt = millis() / 1000;
     }
-}
+}*/
 
-void handelClientOnline(uint8_t * payload, size_t length) {
+/*void handelClientOnline(uint8_t * payload, size_t length) {
     uint8_t i = 4;
     uint8_t event = toDigit(payload[i++]);
     while(payload[i] != 0x22 && i < length) { // '\""'
@@ -200,7 +182,7 @@ void handelClientOnline(uint8_t * payload, size_t length) {
             #endif
         }
     } 
-}
+}*/
 
 #ifdef OUTPUT_DEVICE
 struct System {
@@ -352,6 +334,7 @@ void onMaxUnauthorized(uint8_t * payload) {
 }
 #endif
 
+/*
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     switch(type) 
     {
@@ -479,21 +462,31 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
     }
 
 }
+*/
 
 #if defined(PIR_SENSOR_1_ENABLED) || defined (PIR_SENSOR_2_ENABLED)
 void loopPirSensor(uint8_t i, uint8_t pin) {
-    if(isConnected) {
+    if(mqttClient.connected()) {
         uint64_t now = millis();
         if(now - pirSensorTimestamp[i] > PIR_SENSOR_INTERVAL) {
             pirSensorTimestamp[i] = now;
             uint8_t val = digitalRead(pin);
             if(val != pirSensorLastState[i]) {
-                char payload[100];
-                snprintf(payload, 100, "42[\"state\",{\"sensors\":[{\"pin\":%d,\"value\":%d}]}]", pin, val);
-                webSocket.sendTXT(payload);
+                StaticJsonDocument<100> root;
+                JsonArray sensors = root.createNestedArray("sensors");
+                JsonObject sensor_1 = sensors.createNestedObject();
+                sensor_1["pin"] = pin;
+                sensor_1["value"] = val;
+                char buffer[256];
+                size_t n = serializeJson(root, buffer);
+                char state_topic[50]; // State topic
+                sprintf(state_topic, "/ats/devices/device%d/state", ESP.getChipId());
+                mqttClient.publish(state_topic, buffer, n);
                 pirSensorLastState[i] = val;
                 #ifdef DEBUG
-                    SERIAL_MONITOR.println(payload);
+                    SERIAL_MONITOR.println();
+                    SERIAL_MONITOR.println(state_topic);
+                    serializeJsonPretty(root, SERIAL_MONITOR);
                 #endif
             }
         }
@@ -503,7 +496,7 @@ void loopPirSensor(uint8_t i, uint8_t pin) {
 
 #ifdef PROX_SENSOR_ENABLED
 void loopProxSensor(uint8_t trigger, uint8_t echo) {
-    if(isConnected) {
+    if(mqttClient.connected()) {
         uint64_t now = millis();
         if(now - proxSensorTimestamp > PROX_SENSOR_INTERVAL) {
             proxSensorTimestamp = now;
@@ -518,7 +511,7 @@ void loopProxSensor(uint8_t trigger, uint8_t echo) {
             // Reads the echoPin, returns the sound wave travel time in microseconds
             unsigned long duration = pulseIn(echo, HIGH);
             // Calculating the distance
-            int distance= duration * 0.034 / 2;
+            int distance = duration * 0.034 / 2;
             // Prints the distance on the Serial Monitor
             #ifdef DEBUG
                 SERIAL_MONITOR.print("Distance: ");
@@ -527,16 +520,23 @@ void loopProxSensor(uint8_t trigger, uint8_t echo) {
             
 
             if(distance != proxSensorLastDist) {
-                char payload[100];
                 uint8_t val = 0;
                 if (distance < PROX_SENSOR_THRESHOLD) {
                     val = 1;
                 }
-                snprintf(payload, 100, "42[\"state\",{\"sensors\":[{\"pin\":%d,\"value\":%d}]}]", echo, val);
-                webSocket.sendTXT(payload);
+                StaticJsonDocument<100> root;
+                JsonArray sensors = root.createNestedArray("sensors");
+                JsonObject sensor_1 = sensors.createNestedObject();
+                sensor_1["pin"] = echo;
+                sensor_1["value"] = val;
+                char buffer[256];
+                size_t n = serializeJson(root, buffer);
+                mqttClient.publish(state_topic, buffer, n);
                 proxSensorLastDist = val;
                 #ifdef DEBUG
-                    SERIAL_MONITOR.println(payload);
+                    SERIAL_MONITOR.println();
+                    SERIAL_MONITOR.println(state_topic);
+                    serializeJsonPretty(root, SERIAL_MONITOR);
                 #endif
             }
         }
@@ -544,55 +544,142 @@ void loopProxSensor(uint8_t trigger, uint8_t echo) {
 }
 #endif
 
-void heartbeat() {
-    if(isConnected) {
-        uint64_t now = millis();
-        if((now - heartbeatTimestamp) > HEARTBEAT_INTERVAL) {
-            heartbeatTimestamp = now;
-            webSocket.sendTXT("2");
-            #ifdef DEBUG
-                SERIAL_MONITOR.println(F("Sending heartbeat..."));
-            #endif
+void mqtt_callback(char* topic, byte* payload, unsigned int length) {
+    #ifdef DEBUG
+        SERIAL_MONITOR.print(F("Message arrived ["));
+        SERIAL_MONITOR.print(topic);
+        SERIAL_MONITOR.print(F("] "));
+        for (unsigned int i = 0; i < length; i++) {
+            SERIAL_MONITOR.print((char)payload[i]);
         }
+        SERIAL_MONITOR.println();
+    #endif
+
+    // TODO: ....
+    // StaticJsonDocument<256> doc;
+    // deserializeJson(doc, payload, length);
+
+}
+
+boolean mqtt_reconnect() {
+    #ifdef DEBUG
+        SERIAL_MONITOR.println(F("Attempting MQTT connection..."));
+    #endif
+    // Attempt to connect
+    char client_id[30]; // Client ID
+    sprintf(client_id, "ats_client_%d", ESP.getChipId());
+    char device_id[30]; // Device ID
+    sprintf(device_id, "device%d", ESP.getChipId());
+    char will_topic[50]; // Will topic
+    sprintf(will_topic, "/ats/devices/device%d/lwt", ESP.getChipId());
+    const int will_qos = 0;
+    const bool will_retain = true;
+    const char will_message[] = "offline";
+    #ifdef DEBUG
+        SERIAL_MONITOR.print(F("ClientId: "));
+        SERIAL_MONITOR.println(client_id);
+        SERIAL_MONITOR.print(F("DeviceId: "));
+        SERIAL_MONITOR.println(device_id);
+    #endif
+    // if (mqttClient.connect(client_id, mqtt_user, mqtt_pass, will_topic, will_qos, will_retain, will_message, false)) {
+    if (mqttClient.connect(client_id)) {
+        #ifdef DEBUG
+            SERIAL_MONITOR.println(F("connected"));
+        #endif
+        // Once connected, publish an announcement...
+        mqttClient.publish(will_topic, "online");
+        #ifdef OUTPUT_DEVICE
+            // ... and resubscribe
+            mqttClient.subscribe("/ats/system/#");
+        #endif
+    } else {
+        #ifdef DEBUG
+        SERIAL_MONITOR.print("failed, rc=");
+        SERIAL_MONITOR.println(mqttClient.state());
+        // -4 > MQTT_CONNECTION_TIMEOUT
+        // -3 > MQTT_CONNECTION_LOST
+        // -2 > MQTT_CONNECT_FAILED
+        // -1 > MQTT_DISCONNECTED
+        // 0  > MQTT_CONNECTED
+        // 1  > MQTT_CONNECT_BAD_PROTOCOL
+        // 2  > MQTT_CONNECT_BAD_CLIENT_ID
+        // 3  > MQTT_CONNECT_UNAVAILABLE
+        // 4  > MQTT_CONNECT_BAD_CREDENTIALS
+        // 5  > MQTT_CONNECT_UNAUTHORIZED
+        #endif
+    }
+    return mqttClient.connected();
+}
+
+void setup_wifi() {
+    delay(10);
+    
+    // We start by connecting to a WiFi network
+    #ifdef DEBUG
+        SERIAL_MONITOR.println();
+        SERIAL_MONITOR.print(F("Connecting to "));
+        SERIAL_MONITOR.println(ssid);
+    #endif
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin(ssid, pass);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        #ifdef DEBUG
+            SERIAL_MONITOR.print(".");
+        #endif
+        delay(300);
+    }
+
+    randomSeed(micros());
+
+    #ifdef DEBUG
+        SERIAL_MONITOR.println();
+        SERIAL_MONITOR.println(F("WiFi connected"));
+        SERIAL_MONITOR.print(F("IP address: "));
+        SERIAL_MONITOR.println(WiFi.localIP());
+    #endif
+}
+
+void setup_mqtt_server() {
+    #ifdef DEBUG
+        SERIAL_MONITOR.println();
+        SERIAL_MONITOR.print(F("Connecting to MQTT Broker "));
+        SERIAL_MONITOR.print(mqtt_server);
+        SERIAL_MONITOR.print(F(":"));
+        SERIAL_MONITOR.println(mqtt_port);
+    #endif
+    mqttClient.setServer(mqtt_server, mqtt_port);
+    mqttClient.setCallback(mqtt_callback);
+}
+
+void async_mqtt_loop() {
+    if (!mqttClient.connected()) {
+        disconnectedCount += 1;
+        long now = millis();
+        if (now - lastReconnectAttempt > reconnectDelay) {
+            lastReconnectAttempt = now;
+            // Attempt to reconnect
+            if (mqtt_reconnect()) {
+                lastReconnectAttempt = 0;
+            } else if (disconnectedCount > 12) {
+                ESP.restart();
+            }
+        }
+    } else {
+        // Client connected
+        disconnectedCount = 0;
+        mqttClient.loop();
     }
 }
 
 void setup() {
     SERIAL_MONITOR.begin(115200);
-
-    #ifdef DEBUG
-        SERIAL_MONITOR.println();
-        SERIAL_MONITOR.println(F("Starting..."));
-    #endif
-
-    WiFiMulti.addAP(ssid, pass);
-
-    #ifdef DEBUG
-        SERIAL_MONITOR.print(F("[SETUP] Connecting to "));
-        SERIAL_MONITOR.print(ssid);
-    #endif
-    //WiFi.disconnect();
-    while(WiFiMulti.run() != WL_CONNECTED) {
-        #ifdef DEBUG
-            SERIAL_MONITOR.print(".");
-        #endif
-        delay(100);
-    }
-
-    #ifdef DEBUG
-        SERIAL_MONITOR.println();
-        SERIAL_MONITOR.print(F("Connecting to server "));
-        SERIAL_MONITOR.print(wsServer);
-        SERIAL_MONITOR.print(F(":"));
-        SERIAL_MONITOR.println(wsPort);
-    #endif
-    webSocket.beginSocketIO(wsServer, wsPort);
-    //webSocket.setAuthorization("user", "Password"); // HTTP Basic Authorization
-    webSocket.onEvent(webSocketEvent);
-
+    setup_wifi();
+    setup_mqtt_server();
     #ifdef PIR_SENSOR_1_ENABLED
         #ifdef DEBUG
-            SERIAL_MONITOR.println(F("Configuring Pir Sensor 1"));
+            SERIAL_MONITOR.printf("Configuring PIR sensor 1 on PIN %d\n", PIR_SENSOR_1_PIN);
         #endif
         pinMode(PIR_SENSOR_1_PIN, INPUT);
         pirSensorLastState[0] = digitalRead(PIR_SENSOR_1_PIN);
@@ -600,7 +687,7 @@ void setup() {
 
     #ifdef PIR_SENSOR_2_ENABLED
         #ifdef DEBUG
-            SERIAL_MONITOR.println(F("Configuring Pir Sensor 2"));
+            SERIAL_MONITOR.printf("Configuring PIR sensor 2 on PIN %d\n", PIR_SENSOR_2_PIN);
         #endif
         pinMode(PIR_SENSOR_2_PIN, INPUT);
         pirSensorLastState[1] = digitalRead(PIR_SENSOR_2_PIN);
@@ -623,7 +710,7 @@ void setup() {
 }
 
 void loop() {
-    webSocket.loop();
+    async_mqtt_loop();
 
     #ifdef PIR_SENSOR_1_ENABLED
         loopPirSensor(0, PIR_SENSOR_1_PIN);
@@ -636,6 +723,4 @@ void loop() {
     #ifdef PROX_SENSOR_ENABLED
         loopProxSensor(PROX_SENSOR_TRIG_PIN, PROX_SENSOR_ECHO_PIN);
     #endif
-
-    heartbeat();
 }
