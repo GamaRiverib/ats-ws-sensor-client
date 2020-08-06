@@ -1,6 +1,6 @@
-const char * ssid = "kyg";
-const char * pass = "kelvita18102009";
-const char * mqtt_server = "192.168.0.142";
+const char * ssid = "";
+const char * pass = "";
+const char * mqtt_server = "127.0.0.1";
 const int mqtt_port = 1883;
 const char * mqtt_user = NULL;
 const char * mqtt_pass = NULL;
